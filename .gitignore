@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.tmp
+
+# Local sidecars + rollback snapshots — only the canonical xlsx is tracked
+*_pending_save.xlsx
+*_NEW.xlsx
+*_pending.xlsx
+*_pre-*-backup.xlsx
+*_link_check.xlsx

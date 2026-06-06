@@ -1,0 +1,58 @@
+name: Daily dashboard refresh
+
+# Free path: GitHub Actions (free tier) re-checks links + re-renders the
+# dashboard from the committed xlsx, commits any changes back, and publishes
+# to GitHub Pages. No paid API — the AI regulatory scan stays in Cowork.
+
+on:
+  schedule:
+    - cron: "6 11 * * 1-5"   # ~03:06 PT (UTC-only; ignores DST drift by design)
+  workflow_dispatch: {}        # manual "Run workflow" button
+
+permissions:
+  contents: write              # commit refreshed xlsx/dashboard back to the repo
+  pages: write                 # deploy to GitHub Pages
+  id-token: write              # required by deploy-pages
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install openpyxl requests
+      - name: Verify links (writes Link Check tab into the xlsx)
+        run: python verify_links.py --xlsx HR_Compliance_Framework_COMPLETE.xlsx
+        continue-on-error: true   # broken links are data, not a build failure
+      - name: Regenerate dashboard into public/
+        run: python generate_dashboard.py --xlsx HR_Compliance_Framework_COMPLETE.xlsx --out public/dashboard.html
+      - name: Sanity check
+        run: |
+          test -s public/dashboard.html
+          [ "$(wc -c < public/dashboard.html)" -gt 100000 ] || { echo "dashboard too small"; exit 1; }
+      - name: Commit refreshed files back
+        run: |
+          git config user.name "hr-compliance-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          git commit -m "Daily refresh $(date -u +%Y-%m-%d)" || echo "no changes to commit"
+          git push || echo "nothing to push"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
