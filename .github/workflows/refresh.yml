@@ -5,6 +5,10 @@ name: Daily dashboard refresh
 # to GitHub Pages. No paid API — the AI regulatory scan stays in Cowork.
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "HR_Compliance_Framework_COMPLETE.xlsx"  # only redeploy when scan data changes
   schedule:
     - cron: "6 11 * * 1-5"   # ~03:06 PT (UTC-only; ignores DST drift by design)
   workflow_dispatch: {}        # manual "Run workflow" button
