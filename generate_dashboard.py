@@ -24,6 +24,7 @@ KEY_FIELDS = [
     "Effective Date", "Status", "Gov Source URL", "Risk Level",
     "Penalty Exposure", "Workforce %", "Primary HR Owner", "Compliance Control",
     "Last Review", "Current Gap", "Change Watch", "Notes / Action Items",
+    "Date Added",
 ]
 
 # Full state name lookup (matches us-atlas TopoJSON `properties.name` exactly)
@@ -154,6 +155,31 @@ def normalize_risk(risk_str):
     if "GREEN" in s: return "GREEN"
     return "UNKNOWN"
 
+def _parse_eff_date(text):
+    """Extract a sortable YYYY-MM-DD from a free-text effective-date field. Returns '' if unparseable."""
+    if not text: return ""
+    t = str(text)
+    # Look for explicit M/D/YYYY first
+    m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", t)
+    if m:
+        return f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    # ISO YYYY-MM-DD
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", t)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    # Year only
+    m = re.search(r"\b(19|20)\d{2}\b", t)
+    if m:
+        return f"{m.group(0)}-01-01"
+    return ""
+
+def _parse_date_added(text):
+    """Extract a sortable YYYY-MM-DD from Date Added (may have annotations like '2026-04-27 (initial QC)')."""
+    if not text: return ""
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", str(text))
+    if m: return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return ""
+
 def normalize_category(c):
     """Strip sub-flavor suffixes so 'Pay Transparency – Proposed' → 'Pay Transparency'."""
     if not c: return ""
@@ -178,9 +204,26 @@ def normalize_jurisdiction(j):
 
 def compute_state_data(all_rows):
     """Group regs by state. Dedupe by Law ID across tabs. Returns {state: {count, by_domain: {domain: [reg, ...]}}}."""
-    # Dedupe by Law ID (BOTH-TABS rule means many regs appear in 2+ tabs)
+    # Dedupe by Law ID (BOTH-TABS rule means many regs appear in 2+ tabs).
+    # Also filter out baseline / cross-reference placeholder rows — these represent
+    # "no law" or pending cross-refs and should never count toward map pills or drill-downs.
+    BASELINE_STATUSES = {"no state law", "no state mandate", "no state ban the box",
+                          "no state employment protection", "federal warn only",
+                          "federal pump act only", "federal flsa only", "federal flsa child labor",
+                          "common-law standard", "state default rule",
+                          "enacted (cross-ref pending)", "no state program"}
+    def is_baseline(r):
+        lid = (r.get("Law ID") or "").upper()
+        if lid.endswith("-BASE") or lid.endswith("-XREF"):
+            return True
+        status = (r.get("Status") or "").strip().lower()
+        if any(b in status for b in BASELINE_STATUSES):
+            return True
+        return False
+
     by_law_id = {}
     for r in all_rows:
+        if is_baseline(r): continue
         lid = r.get("Law ID")
         if not lid: continue
         if lid not in by_law_id:
@@ -205,11 +248,14 @@ def compute_state_data(all_rows):
             "owner": r["Primary HR Owner"] or "—",
             "status": r["Status"],
             "effective": r["Effective Date"],
+            "effective_sortable": _parse_eff_date(r["Effective Date"]),
             "risk": normalize_risk(r["Risk Level"]),
             "url": r["Gov Source URL"],
             "appears_in": r["appears_in"],
             "category": raw_cat,
             "category_norm": cat_norm,
+            "date_added": r.get("Date Added", ""),
+            "date_added_sortable": _parse_date_added(r.get("Date Added", "")),
         })
     # Convert defaultdicts → dicts for JSON
     out = {}
@@ -233,6 +279,18 @@ def collect_categories(state_data):
     return [{"name": k, "count": v} for k, v in sorted(cnt.items(), key=lambda x: (-x[1], x[0]))]
 
 def compute_metrics(rows):
+    # Filter out baseline / cross-ref rows — they should never count in KPIs or map counts.
+    BASELINE_STATUSES_M = {"no state law", "no state mandate", "no state ban the box",
+                            "no state employment protection", "federal warn only",
+                            "federal pump act only", "federal flsa only", "federal flsa child labor",
+                            "common-law standard", "state default rule",
+                            "enacted (cross-ref pending)", "no state program"}
+    def _is_baseline(r):
+        lid = (r.get("Law ID") or "").upper()
+        if lid.endswith("-BASE") or lid.endswith("-XREF"): return True
+        st = (r.get("Status") or "").strip().lower()
+        return any(b in st for b in BASELINE_STATUSES_M)
+    rows = [r for r in rows if not _is_baseline(r)]
     today = date.today()
     horizon = date(today.year + 1, today.month, today.day) if not (today.month == 2 and today.day == 29) else date(today.year + 1, 3, 1)
     metrics = {
@@ -360,6 +418,12 @@ body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
 .domain-reg-meta { font-size:11px; color:var(--text3); margin-top:2px; }
 .coe { display:inline-block; padding:3px 10px; border-radius:12px; font-size:11px; background:var(--teal-bg); color:var(--teal-fg); white-space:nowrap; }
 .coe.unowned { background:var(--bg3); color:var(--text3); }
+.state-panel-controls { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0 14px; padding-bottom:10px; border-bottom:0.5px solid var(--border); }
+.state-panel-controls label { font-size:11px; color:var(--text3); text-transform:uppercase; letter-spacing:0.5px; }
+.state-panel-controls select { font-size:12px; padding:5px 10px; border:0.5px solid var(--border2); border-radius:6px; background:var(--bg); color:var(--text); }
+.state-panel-controls input { font-size:12px; padding:5px 10px; border:0.5px solid var(--border2); border-radius:6px; background:var(--bg); color:var(--text); min-width:160px; }
+.domain-reg-dates { font-size:10px; color:var(--text3); white-space:nowrap; margin-top:2px; }
+.domain-reg-dates b { color:var(--text2); font-weight:500; }
 .today-card { background:var(--bg); border:0.5px solid var(--border); border-left:4px solid var(--coral); border-radius:12px; padding:16px; margin-bottom:16px; }
 .today-card.empty { border-left-color:var(--gray); }
 .today-card.stale { border-left-color:var(--yellow-fg); background:var(--yellow-bg); }
@@ -539,6 +603,34 @@ a { color:var(--blue-fg); }
     <div class="state-panel-head">
       <div class="state-panel-title" id="state-panel-title"></div>
       <button class="state-panel-close" id="state-panel-close" aria-label="Close">×</button>
+    </div>
+    <div class="state-panel-controls">
+      <label for="sp-sort">Sort by</label>
+      <select id="sp-sort">
+        <option value="domain">Core Domain (default)</option>
+        <option value="effective_asc">Effective date · earliest first</option>
+        <option value="effective_desc">Effective date · latest first</option>
+        <option value="date_added_desc">Date added · newest first</option>
+        <option value="date_added_asc">Date added · oldest first</option>
+        <option value="name">Regulation name (A-Z)</option>
+      </select>
+      <label for="sp-filter-eff">Effective</label>
+      <select id="sp-filter-eff">
+        <option value="">All</option>
+        <option value="past">Already in effect</option>
+        <option value="next_90">Next 90 days</option>
+        <option value="next_365">Next 12 months</option>
+        <option value="beyond_365">Beyond 12 months</option>
+        <option value="undated">No effective date set</option>
+      </select>
+      <label for="sp-filter-added">Added since</label>
+      <select id="sp-filter-added">
+        <option value="">All</option>
+        <option value="7">Last 7 days</option>
+        <option value="30">Last 30 days</option>
+        <option value="90">Last 90 days</option>
+      </select>
+      <input id="sp-search" type="text" placeholder="Search this state…" />
     </div>
     <div id="state-panel-body"></div>
   </div>
@@ -832,56 +924,163 @@ function renderPillMap() {
   document.getElementById('federal-count').textContent = fedCount;
 }
 
-// Override showStatePanel to use filtered data
+// Override showStatePanel to use filtered data + date sort/filter
 const originalShowStatePanel = showStatePanel;
+let currentStateName = null;
+
+function _today() { return new Date().toISOString().slice(0,10); }
+function _daysBetween(a, b) {
+  // Both YYYY-MM-DD; returns b - a in days
+  const da = new Date(a + 'T00:00:00Z'), db = new Date(b + 'T00:00:00Z');
+  return Math.round((db - da) / 86400000);
+}
+
+function _applyStateFilters(regs) {
+  const sortBy = document.getElementById('sp-sort').value || 'domain';
+  const effFilter = document.getElementById('sp-filter-eff').value;
+  const addedFilter = document.getElementById('sp-filter-added').value;
+  const q = (document.getElementById('sp-search').value || '').toLowerCase();
+  const today = _today();
+  let out = regs.slice();
+  // Effective filter
+  if (effFilter) {
+    out = out.filter(r => {
+      const es = r.effective_sortable || '';
+      if (effFilter === 'undated') return !es;
+      if (!es) return false;
+      const delta = _daysBetween(today, es);
+      if (effFilter === 'past') return delta < 0;
+      if (effFilter === 'next_90') return delta >= 0 && delta <= 90;
+      if (effFilter === 'next_365') return delta >= 0 && delta <= 365;
+      if (effFilter === 'beyond_365') return delta > 365;
+      return true;
+    });
+  }
+  // Date Added filter
+  if (addedFilter) {
+    out = out.filter(r => {
+      const das = r.date_added_sortable;
+      if (!das) return false;
+      const ageDays = -_daysBetween(today, das);  // positive = past days
+      return ageDays >= 0 && ageDays <= parseInt(addedFilter, 10);
+    });
+  }
+  // Search
+  if (q) {
+    out = out.filter(r => {
+      const hay = (r.name + ' ' + r.law_id + ' ' + (r.status||'') + ' ' + (r.owner||'') + ' ' + (r.category||'')).toLowerCase();
+      return hay.includes(q);
+    });
+  }
+  // Sort
+  if (sortBy === 'effective_asc') {
+    out.sort((a,b) => (a.effective_sortable || 'zzzz').localeCompare(b.effective_sortable || 'zzzz'));
+  } else if (sortBy === 'effective_desc') {
+    out.sort((a,b) => (b.effective_sortable || '').localeCompare(a.effective_sortable || ''));
+  } else if (sortBy === 'date_added_desc') {
+    out.sort((a,b) => (b.date_added_sortable || '').localeCompare(a.date_added_sortable || ''));
+  } else if (sortBy === 'date_added_asc') {
+    out.sort((a,b) => (a.date_added_sortable || 'zzzz').localeCompare(b.date_added_sortable || 'zzzz'));
+  } else if (sortBy === 'name') {
+    out.sort((a,b) => (a.name||'').localeCompare(b.name||''));
+  }
+  return { regs: out, groupByDomain: sortBy === 'domain' };
+}
+
+function _renderStatePanelBody(stateName, sdFiltered) {
+  const body = document.getElementById('state-panel-body');
+  body.innerHTML = '';
+  // Two render modes: grouped by domain (default), or flat sorted list
+  if (sdFiltered.groupByDomain) {
+    // Re-group regs by domain
+    const byDomain = {};
+    sdFiltered.regs.forEach(r => { (byDomain[r._domain] = byDomain[r._domain] || []).push(r); });
+    const order = Object.keys(byDomain).sort((a,b) => byDomain[b].length - byDomain[a].length);
+    order.forEach(domain => _appendGroup(body, domain, byDomain[domain]));
+  } else {
+    _appendGroup(body, 'Results', sdFiltered.regs);
+  }
+  if (sdFiltered.regs.length === 0) {
+    body.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:12px 0;">No regulations match these filters for ' + stateName + '.</div>';
+  }
+}
+
+function _appendGroup(body, label, regs) {
+  if (!regs.length) return;
+  const group = document.createElement('div'); group.className = 'domain-group';
+  const head = document.createElement('div'); head.className = 'domain-group-head';
+  head.textContent = label + ' (' + regs.length + ')';
+  group.appendChild(head);
+  regs.forEach(r => {
+    const row = document.createElement('div'); row.className = 'domain-reg';
+    if (r.law_id) row.setAttribute('data-summary', r.law_id);
+    const left = document.createElement('div'); left.style.flex = '1';
+    const nameHtml = r.url ? '<a href="' + r.url + '" target="_blank" rel="noopener">' + r.name + '</a>' : r.name;
+    const catLabel = r.category ? ' · ' + r.category : '';
+    const effLabel = r.effective ? '<b>Effective:</b> ' + r.effective : '<b>Effective:</b> —';
+    const addedLabel = r.date_added ? '<b>Added:</b> ' + r.date_added : '<b>Added:</b> —';
+    left.innerHTML = '<div class="domain-reg-name">' + nameHtml + '<span class="domain-reg-id">' + r.law_id + '</span></div>' +
+                     '<div class="domain-reg-meta">' + (r.status || '') + catLabel + '</div>' +
+                     '<div class="domain-reg-dates">' + effLabel + ' &nbsp;·&nbsp; ' + addedLabel + '</div>';
+    const owner = document.createElement('span');
+    const isOwned = r.owner && r.owner !== '—';
+    owner.className = 'coe' + (isOwned ? '' : ' unowned');
+    owner.textContent = isOwned ? r.owner : 'No CoE owner';
+    row.appendChild(left);
+    row.appendChild(owner);
+    if (r.risk && r.risk !== 'UNKNOWN') {
+      const pill = document.createElement('span');
+      pill.className = 'pill ' + r.risk;
+      pill.style.marginLeft = '6px';
+      pill.textContent = r.risk;
+      row.appendChild(pill);
+    }
+    group.appendChild(row);
+  });
+  body.appendChild(group);
+}
+
 showStatePanel = function(stateName) {
+  currentStateName = stateName;
   const sd = getFilteredStatePanel(stateName);
   const panel = document.getElementById('state-panel');
   const title = document.getElementById('state-panel-title');
-  const body = document.getElementById('state-panel-body');
   const filterSuffix = currentCategoryFilter ? ' · category: ' + currentCategoryFilter : '';
   if (sd.count === 0) {
     title.textContent = stateName + ' — no regulations' + filterSuffix;
-    body.innerHTML = '<div style="color:var(--text2);font-size:13px;">No regulations match this filter for ' + stateName + '.</div>';
-  } else {
-    title.textContent = stateName + ' — ' + sd.count + ' regulation' + (sd.count === 1 ? '' : 's') + filterSuffix;
-    body.innerHTML = '';
-    const domainOrder = Object.keys(sd.by_domain).sort((a, b) => sd.by_domain[b].length - sd.by_domain[a].length);
-    domainOrder.forEach(domain => {
-      const regs = sd.by_domain[domain];
-      const group = document.createElement('div'); group.className = 'domain-group';
-      const head = document.createElement('div'); head.className = 'domain-group-head';
-      head.textContent = domain + ' (' + regs.length + ')';
-      group.appendChild(head);
-      regs.forEach(r => {
-        const row = document.createElement('div'); row.className = 'domain-reg';
-        if (r.law_id) row.setAttribute('data-summary', r.law_id);
-        const left = document.createElement('div'); left.style.flex = '1';
-        const nameHtml = r.url ? '<a href="' + r.url + '" target="_blank" rel="noopener">' + r.name + '</a>' : r.name;
-        const catLabel = r.category ? ' · ' + r.category : '';
-        left.innerHTML = '<div class="domain-reg-name">' + nameHtml + '<span class="domain-reg-id">' + r.law_id + '</span></div>' +
-                         '<div class="domain-reg-meta">' + (r.status || '') + (r.effective ? ' · eff. ' + r.effective : '') + catLabel + '</div>';
-        const owner = document.createElement('span');
-        const isOwned = r.owner && r.owner !== '—';
-        owner.className = 'coe' + (isOwned ? '' : ' unowned');
-        owner.textContent = isOwned ? r.owner : 'No CoE owner';
-        row.appendChild(left);
-        row.appendChild(owner);
-        if (r.risk && r.risk !== 'UNKNOWN') {
-          const pill = document.createElement('span');
-          pill.className = 'pill ' + r.risk;
-          pill.style.marginLeft = '6px';
-          pill.textContent = r.risk;
-          row.appendChild(pill);
-        }
-        group.appendChild(row);
-      });
-      body.appendChild(group);
-    });
+    document.getElementById('state-panel-body').innerHTML = '<div style="color:var(--text2);font-size:13px;">No regulations match this filter for ' + stateName + '.</div>';
+    panel.classList.add('open');
+    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    return;
   }
+  title.textContent = stateName + ' — ' + sd.count + ' regulation' + (sd.count === 1 ? '' : 's') + filterSuffix;
+  // Flatten regs with their domain attached, for re-grouping/sorting
+  const flatRegs = [];
+  Object.entries(sd.by_domain).forEach(([domain, regs]) => {
+    regs.forEach(r => flatRegs.push({...r, _domain: domain}));
+  });
+  // Stash on a property for re-renders triggered by controls
+  panel._currentFlatRegs = flatRegs;
+  _renderStatePanelBody(stateName, _applyStateFilters(flatRegs));
   panel.classList.add('open');
   panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 };
+
+// Wire up control change handlers
+['sp-sort','sp-filter-eff','sp-filter-added'].forEach(id => {
+  document.getElementById(id).addEventListener('change', () => {
+    const panel = document.getElementById('state-panel');
+    if (currentStateName && panel._currentFlatRegs) {
+      _renderStatePanelBody(currentStateName, _applyStateFilters(panel._currentFlatRegs));
+    }
+  });
+});
+document.getElementById('sp-search').addEventListener('input', () => {
+  const panel = document.getElementById('state-panel');
+  if (currentStateName && panel._currentFlatRegs) {
+    _renderStatePanelBody(currentStateName, _applyStateFilters(panel._currentFlatRegs));
+  }
+});
 
 // Build category dropdown options
 (function buildCategoryFilter(){
@@ -1303,7 +1502,19 @@ renderTable();
 """
 
 def render_html(rows, metrics, latest_updates, state_data, categories, refresh_info):
-    payload = {"rows": rows, "metrics": metrics, "latest_updates": latest_updates, "state_data": state_data, "categories": categories, "refresh": refresh_info, "generated": refresh_info["today_iso"]}
+    # Filter baseline rows from the payload so the bottom table, tooltips, and search all skip them
+    BASELINE_STATUSES_P = {"no state law", "no state mandate", "no state ban the box",
+                            "no state employment protection", "federal warn only",
+                            "federal pump act only", "federal flsa only", "federal flsa child labor",
+                            "common-law standard", "state default rule",
+                            "enacted (cross-ref pending)", "no state program"}
+    def _is_baseline_p(r):
+        lid = (r.get("Law ID") or "").upper()
+        if lid.endswith("-BASE") or lid.endswith("-XREF"): return True
+        st = (r.get("Status") or "").strip().lower()
+        return any(b in st for b in BASELINE_STATUSES_P)
+    filtered_rows = [r for r in rows if not _is_baseline_p(r)]
+    payload = {"rows": filtered_rows, "metrics": metrics, "latest_updates": latest_updates, "state_data": state_data, "categories": categories, "refresh": refresh_info, "generated": refresh_info["today_iso"]}
     data_json = json.dumps(payload, ensure_ascii=True)
     red = metrics["by_risk"].get("RED", 0)
     yellow = metrics["by_risk"].get("YELLOW", 0)
